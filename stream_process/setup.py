@@ -29,7 +29,7 @@ extra_link_args = gstreamer_libs + glib_libs + opencv_libs + gst_app_libs + ['-l
 
 module = Extension(
     'stream_processor',
-    sources=['stream_processor1.cpp'],
+    sources=['stream_processor.cpp'],
     language='c++',
     include_dirs=include_dirs,
     library_dirs=library_dirs,
