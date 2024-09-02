@@ -28,6 +28,7 @@ RUN apt-get update && \
     gstreamer1.0-tools \
     # 개발용 헤더파일
     libgstreamer1.0-dev \
+    libglib2.0-dev \
     libgstreamer-plugins-base1.0-dev \
     libgstreamer-plugins-good1.0-dev \
     libgstreamer-plugins-bad1.0-dev \
@@ -43,10 +44,11 @@ RUN apt-get update && \
     gstreamer1.0-gtk3 gstreamer1.0-qt5 \
     gstreamer1.0-pulseaudio \
     build-essential manpages-dev vim wget curl git python3-pip \
-    pkg-config ninja-build flex bison equivs devscripts gdb
+    pkg-config ninja-build flex bison equivs devscripts gdb \
+    python3-dev python-dev
 
 RUN python3 -m pip install meson
-RUN pip install cmake==3.27.2
+RUN pip install cmake==3.27.2 numpy
 
 
 WORKDIR ${GSTREAMER}

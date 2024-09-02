@@ -2,8 +2,8 @@ version: "3"
 
 services:
   gst:
-    image: gstreamer-dev:latest
-    container_name: gstreamer
+    image: gstreamerlib:latest
+    container_name: gstreamerlib
     deploy:
       resources:
         reservations:

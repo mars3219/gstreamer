@@ -1,3 +1,6 @@
+# ignore folder
+C++/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
