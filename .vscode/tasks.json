@@ -1,0 +1,45 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "type": "cppbuild",
+            "label": "build",
+            "command": "g++",
+            "args": [
+                "-fdiagnostics-color=always",
+                "-g",
+                "${file}",
+                "-o",
+                "${fileDirname}/${fileBasenameNoExtension}",
+                "-I/usr/include/gstreamer-1.0",
+                "-I/usr/include/glib-2.0",
+                "-I/usr/lib/x86_64-linux-gnu/glib-2.0/include",
+                "-I/usr/include/opencv4",
+                "-I/usr/include/python3.8",
+                "-I/usr/include/python2.7",
+                "-lgstreamer-1.0",
+                "-lgobject-2.0",
+                "-lglib-2.0",
+                "-lgstapp-1.0",
+                "-pthread",
+                "-lopencv_core",
+                "-lopencv_imgproc",
+                "-lopencv_highgui",
+                "-lopencv_imgcodecs",
+                "-lpython3.8",
+                "-lpython2.7"
+            ],
+            "options": {
+                "cwd": "${fileDirname}"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "detail": "compiler: /usr/bin/g++"
+        }
+    ]
+}
