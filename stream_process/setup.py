@@ -1,5 +1,7 @@
 from setuptools import setup, Extension
+from setuptools.command.build_ext import build_ext
 import subprocess
+import os
 
 # Get pkg-config flags for a given package
 def get_pkg_config_flags(package_name):
@@ -38,9 +40,20 @@ module = Extension(
     extra_link_args=extra_link_args
 )
 
+# 커스텀 빌드 커맨드
+class CustomBuildExt(build_ext):
+    def get_ext_filename(self, ext_name):
+        # 기본 파일 이름 생성 규칙을 적용한 후
+        filename = super().get_ext_filename(ext_name)
+        # cpython-38-x86_64-linux-gnu 부분을 제거
+        if 'cpython' in filename:
+            filename = filename.split('.')[0] + '.so'
+        return filename
+
 setup(
     name='stream_processor',
     version='1.0',
     description='Python interface for stream processing',
-    ext_modules=[module]
+    ext_modules=[module],
+    cmdclass={'build_ext': CustomBuildExt},  # 커스텀 빌드 명령어 적용
 )

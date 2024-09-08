@@ -110,28 +110,55 @@ static void* stream_thread(void *arg) {
     return NULL;
 }
 
+// static GstElement* create_pipeline(const gchar *rtsp_url) {
+//     GstElement *pipeline, *source, *sink;
+//     GstCaps *caps;
+
+//     pipeline = gst_parse_launch(
+//         "rtspsrc name=source ! rtph264depay ! avdec_h264 ! videoconvert ! appsink name=sink",
+//         NULL);
+
+//     source = gst_bin_get_by_name(GST_BIN(pipeline), "source");
+//     g_object_set(source, "location", rtsp_url, NULL);
+
+//     sink = gst_bin_get_by_name(GST_BIN(pipeline), "sink");
+//     caps = gst_caps_new_simple("video/x-raw",
+//                                "format", G_TYPE_STRING, "RGB",
+//                                "width", G_TYPE_INT, IMG_WIDTH,
+//                                "height", G_TYPE_INT, IMG_HEIGHT,
+//                                NULL);
+//     g_object_set(sink, "caps", caps, "emit-signals", TRUE, NULL);
+//     gst_caps_unref(caps);
+
+//     return pipeline;
+// }
+
 static GstElement* create_pipeline(const gchar *rtsp_url) {
-    GstElement *pipeline, *source, *sink;
+    GstElement *pipeline, *source, *capsfilter, *appsink;
     GstCaps *caps;
 
     pipeline = gst_parse_launch(
-        "rtspsrc name=source ! rtph264depay ! avdec_h264 ! videoconvert ! appsink name=sink",
+        "rtspsrc name=source ! rtph264depay ! avdec_h264 ! videoconvert ! videoscale ! capsfilter name=capsfilter ! appsink name=sink",
         NULL);
 
     source = gst_bin_get_by_name(GST_BIN(pipeline), "source");
     g_object_set(source, "location", rtsp_url, NULL);
 
-    sink = gst_bin_get_by_name(GST_BIN(pipeline), "sink");
+    capsfilter = gst_bin_get_by_name(GST_BIN(pipeline), "capsfilter");
     caps = gst_caps_new_simple("video/x-raw",
                                "format", G_TYPE_STRING, "RGB",
                                "width", G_TYPE_INT, IMG_WIDTH,
                                "height", G_TYPE_INT, IMG_HEIGHT,
                                NULL);
-    g_object_set(sink, "caps", caps, "emit-signals", TRUE, NULL);
+    g_object_set(capsfilter, "caps", caps, NULL);
     gst_caps_unref(caps);
+
+    appsink = gst_bin_get_by_name(GST_BIN(pipeline), "sink");
+    g_object_set(appsink, "emit-signals", TRUE, NULL);
 
     return pipeline;
 }
+
 
 static PyObject* set_stream_config(PyObject* self, PyObject* args) {
     PyObject *url_list;
