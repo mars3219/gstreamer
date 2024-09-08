@@ -10,11 +10,13 @@
 #include <queue>
 #include <string>
 #include <vector>
+#include <ctime>
+#include <chrono>
 
 static std::vector<std::string> RTSP_URLS;
 static int IMG_WIDTH = 1280;
 static int IMG_HEIGHT = 720;
-static int FRAMES_PER_SECOND = 2;  // 채널당 1초에 2장씩 저장
+static int SAVE_FRAMES_PER_SECOND = 2;  // 초당 저장할 프레임 
 static int NUM_CHANNELS = 0;
 static int IMAGE_QUEUE_SIZE = 100;
 
@@ -25,6 +27,7 @@ typedef struct {
     time_t last_save_time;
     int frames_stored;
     gboolean running;
+    int restart_attempts;  // 재시작 시도 횟수
 } StreamData;
 
 typedef struct {
@@ -40,34 +43,58 @@ static pthread_cond_t queue_cond = PTHREAD_COND_INITIALIZER;
 static StreamData *stream_data = nullptr;
 static pthread_t *threads = nullptr;
 
+// 현재 시간 밀리초 단위로 반환
+double get_current_time_ms() {
+    auto now = std::chrono::high_resolution_clock::now();
+    auto duration = now.time_since_epoch();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+}
+
 static void on_new_sample(GstAppSink *appsink, gpointer user_data) {
     GstSample *sample;
     GstBuffer *buffer;
     GstMapInfo map;
-    cv::Mat img(IMG_HEIGHT, IMG_WIDTH, CV_8UC3);
+    cv::Mat img;
 
     sample = gst_app_sink_pull_sample(appsink);
     buffer = gst_sample_get_buffer(sample);
 
     if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
-        gsize expected_size = static_cast<gsize>(IMG_WIDTH) * IMG_HEIGHT * 3;
+        // GStreamer 캡슐에서 비디오 스트림의 실제 크기를 얻어옴
+        GstCaps *caps = gst_sample_get_caps(sample);
+        GstStructure *structure = gst_caps_get_structure(caps, 0);
+        gint width, height;
+
+        // 구조체에서 비디오 크기 정보 추출
+        if (!gst_structure_get_int(structure, "width", &width) ||
+            !gst_structure_get_int(structure, "height", &height)) {
+            g_print("Failed to get width and height from caps.\n");
+            gst_buffer_unmap(buffer, &map);
+            gst_sample_unref(sample);
+            return;
+        }
+
+        gsize expected_size = static_cast<gsize>(width) * height * 3;
+
         if (map.size == expected_size) {
+            img.create(height, width, CV_8UC3);
             memcpy(img.data, map.data, map.size);
 
             StreamData *stream = (StreamData *)user_data;
-            time_t current_time = time(NULL);
+            double current_time_ms = get_current_time_ms();
 
-            // 1초에 채널당 2장의 프레임만 큐에 넣기 위한 조건문
-            if (difftime(current_time, stream->last_save_time) >= 1.0) {
-                stream->last_save_time = current_time;
-                stream->frames_stored = 0;
-            }
+            // 프레임 간격 계산
+            double frame_interval = 1000.0 / SAVE_FRAMES_PER_SECOND;  // 1초에 저장할 프레임 간격 (밀리초 단위)
+            double time_since_last_save = current_time_ms - stream->last_save_time;
 
-            if (stream->frames_stored < FRAMES_PER_SECOND) {
+            // 프레임을 균등하게 저장 (초당 지정된 프레임 수만큼)
+            if (time_since_last_save >= frame_interval) {
+                stream->last_save_time = current_time_ms;
+
                 FrameData frame_data;
                 frame_data.image = img.clone();
                 frame_data.channel_id = stream->channel_id;
-                frame_data.timestamp = current_time;
+                frame_data.timestamp = static_cast<time_t>(current_time_ms / 1000); // UNIX 타임으로 변환
 
                 pthread_mutex_lock(&queue_mutex);
                 std::queue<FrameData>::size_type queue_size = image_queue.size();
@@ -85,53 +112,6 @@ static void on_new_sample(GstAppSink *appsink, gpointer user_data) {
 
     gst_sample_unref(sample);
 }
-
-static void* stream_thread(void *arg) {
-    StreamData *stream = (StreamData *)arg;
-    GstStateChangeReturn ret;
-
-    ret = gst_element_set_state(stream->pipeline, GST_STATE_PLAYING);
-    if (ret == GST_STATE_CHANGE_FAILURE) {
-        return NULL;
-    }
-
-    g_signal_connect(stream->appsink, "new-sample", G_CALLBACK(on_new_sample), stream);
-
-    stream->running = TRUE;
-    stream->frames_stored = 0;
-    stream->last_save_time = time(NULL);
-
-    while (stream->running) {
-        usleep(500000);  // 0.5초 대기
-    }
-
-    gst_element_set_state(stream->pipeline, GST_STATE_NULL);
-    gst_object_unref(stream->pipeline);
-    return NULL;
-}
-
-// static GstElement* create_pipeline(const gchar *rtsp_url) {
-//     GstElement *pipeline, *source, *sink;
-//     GstCaps *caps;
-
-//     pipeline = gst_parse_launch(
-//         "rtspsrc name=source ! rtph264depay ! avdec_h264 ! videoconvert ! appsink name=sink",
-//         NULL);
-
-//     source = gst_bin_get_by_name(GST_BIN(pipeline), "source");
-//     g_object_set(source, "location", rtsp_url, NULL);
-
-//     sink = gst_bin_get_by_name(GST_BIN(pipeline), "sink");
-//     caps = gst_caps_new_simple("video/x-raw",
-//                                "format", G_TYPE_STRING, "RGB",
-//                                "width", G_TYPE_INT, IMG_WIDTH,
-//                                "height", G_TYPE_INT, IMG_HEIGHT,
-//                                NULL);
-//     g_object_set(sink, "caps", caps, "emit-signals", TRUE, NULL);
-//     gst_caps_unref(caps);
-
-//     return pipeline;
-// }
 
 static GstElement* create_pipeline(const gchar *rtsp_url) {
     GstElement *pipeline, *source, *capsfilter, *appsink;
@@ -159,14 +139,116 @@ static GstElement* create_pipeline(const gchar *rtsp_url) {
     return pipeline;
 }
 
+static void restart_pipeline(StreamData *stream) {
+
+    // 기존 파이프라인 정지 및 해제
+    if (stream->pipeline) {
+        gst_element_set_state(stream->pipeline, GST_STATE_NULL);
+        gst_object_unref(stream->pipeline);
+        gst_object_unref(stream->appsink);
+    }
+
+    while (true) {
+        stream->restart_attempts++;
+        g_print("Reinitializing pipeline for channel %d, attempt %d\n", stream->channel_id, stream->restart_attempts);
+
+        // 새 파이프라인 생성
+        stream->pipeline = create_pipeline(RTSP_URLS[stream->channel_id].c_str());
+        if (!stream->pipeline) {
+            g_print("Failed to create pipeline for channel %d.\n", stream->channel_id);
+            continue;
+        }
+
+        stream->appsink = gst_bin_get_by_name(GST_BIN(stream->pipeline), "sink");
+        g_signal_connect(stream->appsink, "new-sample", G_CALLBACK(on_new_sample), stream);
+        
+        GstStateChangeReturn ret = gst_element_set_state(stream->pipeline, GST_STATE_PLAYING);
+
+        // 파이프라인을 실행 상태로 전환
+        if (ret == GST_STATE_CHANGE_FAILURE) {
+            g_print("Failed to set pipeline to PLAYING for channel %d.\n", stream->channel_id);
+            continue;
+        } else {
+            break;
+        }
+    }
+
+    stream->restart_attempts = 0;
+    g_print("Pipeline restarted successfully for channel %d\n", stream->channel_id);
+}
+
+static void* stream_thread(void *arg) {
+    StreamData *stream = (StreamData *)arg;
+    GstStateChangeReturn ret;
+    GstBus *bus;
+    GstMessage *msg;
+
+    stream->restart_attempts = 0;
+
+    ret = gst_element_set_state(stream->pipeline, GST_STATE_PLAYING);
+    if (ret == GST_STATE_CHANGE_FAILURE) {
+        return NULL;
+    }
+
+    bus = gst_element_get_bus(stream->pipeline);
+
+    g_signal_connect(stream->appsink, "new-sample", G_CALLBACK(on_new_sample), stream);
+
+    stream->running = TRUE;
+    stream->frames_stored = 0;
+    stream->last_save_time = time(NULL);
+
+    while (stream->running) {
+        msg = gst_bus_timed_pop_filtered(bus, GST_CLOCK_TIME_NONE,
+                                         (GstMessageType)(GST_MESSAGE_ERROR | GST_MESSAGE_EOS));
+        
+        if (msg != NULL) {
+            GError *err;
+            gchar *debug_info;
+
+            switch (GST_MESSAGE_TYPE(msg)) {
+                case GST_MESSAGE_ERROR:
+                    gst_message_parse_error(msg, &err, &debug_info);
+                    g_print("Error received from element %s: %s\n", GST_OBJECT_NAME(msg->src), err->message);
+                    g_print("Debugging information: %s\n", debug_info ? debug_info : "none");
+
+                    g_clear_error(&err);
+                    g_free(debug_info);
+
+                    restart_pipeline(stream);  // 파이프라인 재구성
+                    bus = gst_element_get_bus(stream->pipeline);
+             
+                    break;
+
+                case GST_MESSAGE_EOS:
+                    g_print("End of stream for channel %d. Restarting pipeline.\n", stream->channel_id);
+                    restart_pipeline(stream);  // 파이프라인 재구성
+                    bus = gst_element_get_bus(stream->pipeline);
+                  
+                    break;
+
+                default:
+                    break;
+            }
+            gst_message_unref(msg);
+        }
+
+        usleep(30000);  // 0.03초 대기
+    }
+
+    gst_object_unref(bus);
+    gst_element_set_state(stream->pipeline, GST_STATE_NULL);
+    gst_object_unref(stream->pipeline);
+    return NULL;
+}
 
 static PyObject* set_stream_config(PyObject* self, PyObject* args) {
     PyObject *url_list;
     PyObject *item;
     Py_ssize_t size;
-    int width, height, fps;
+    int width, height, sfps;
 
-    if (!PyArg_ParseTuple(args, "Oiii", &url_list, &width, &height, &fps)) {
+    if (!PyArg_ParseTuple(args, "Oiii", &url_list, &width, &height, &sfps)) {
         return NULL;
     }
 
@@ -190,7 +272,7 @@ static PyObject* set_stream_config(PyObject* self, PyObject* args) {
     NUM_CHANNELS = RTSP_URLS.size();
     IMG_WIDTH = width;
     IMG_HEIGHT = height;
-    FRAMES_PER_SECOND = fps;
+    SAVE_FRAMES_PER_SECOND = sfps;
     IMAGE_QUEUE_SIZE = 100;
 
     Py_RETURN_NONE;
