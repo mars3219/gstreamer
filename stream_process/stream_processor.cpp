@@ -60,17 +60,16 @@ static void on_new_sample(GstAppSink *appsink, gpointer user_data) {
     buffer = gst_sample_get_buffer(sample);
 
     if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
-        // GStreamer 캡슐에서 비디오 스트림의 실제 크기를 얻어옴
         GstCaps *caps = gst_sample_get_caps(sample);
         GstStructure *structure = gst_caps_get_structure(caps, 0);
         gint width, height;
 
-        // 구조체에서 비디오 크기 정보 추출
         if (!gst_structure_get_int(structure, "width", &width) ||
             !gst_structure_get_int(structure, "height", &height)) {
             g_print("Failed to get width and height from caps.\n");
             gst_buffer_unmap(buffer, &map);
             gst_sample_unref(sample);
+            gst_caps_unref(caps);
             return;
         }
 
@@ -82,19 +81,16 @@ static void on_new_sample(GstAppSink *appsink, gpointer user_data) {
 
             StreamData *stream = (StreamData *)user_data;
             double current_time_ms = get_current_time_ms();
-
-            // 프레임 간격 계산
-            double frame_interval = 1000.0 / SAVE_FRAMES_PER_SECOND;  // 1초에 저장할 프레임 간격 (밀리초 단위)
+            double frame_interval = 1000.0 / SAVE_FRAMES_PER_SECOND;
             double time_since_last_save = current_time_ms - stream->last_save_time;
 
-            // 프레임을 균등하게 저장 (초당 지정된 프레임 수만큼)
             if (time_since_last_save >= frame_interval) {
                 stream->last_save_time = current_time_ms;
 
                 FrameData frame_data;
                 frame_data.image = img.clone();
                 frame_data.channel_id = stream->channel_id;
-                frame_data.timestamp = static_cast<time_t>(current_time_ms / 1000); // UNIX 타임으로 변환
+                frame_data.timestamp = static_cast<time_t>(current_time_ms / 1000);
 
                 pthread_mutex_lock(&queue_mutex);
                 std::queue<FrameData>::size_type queue_size = image_queue.size();
@@ -108,9 +104,11 @@ static void on_new_sample(GstAppSink *appsink, gpointer user_data) {
             }
         }
         gst_buffer_unmap(buffer, &map);
+        // gst_caps_unref(caps);
     }
 
     gst_sample_unref(sample);
+    img.release();
 }
 
 static GstElement* create_pipeline(const gchar *rtsp_url) {
@@ -123,6 +121,7 @@ static GstElement* create_pipeline(const gchar *rtsp_url) {
 
     source = gst_bin_get_by_name(GST_BIN(pipeline), "source");
     g_object_set(source, "location", rtsp_url, NULL);
+    gst_object_unref(source);
 
     capsfilter = gst_bin_get_by_name(GST_BIN(pipeline), "capsfilter");
     caps = gst_caps_new_simple("video/x-raw",
@@ -132,9 +131,11 @@ static GstElement* create_pipeline(const gchar *rtsp_url) {
                                NULL);
     g_object_set(capsfilter, "caps", caps, NULL);
     gst_caps_unref(caps);
+    gst_object_unref(capsfilter);
 
     appsink = gst_bin_get_by_name(GST_BIN(pipeline), "sink");
     g_object_set(appsink, "emit-signals", TRUE, NULL);
+    gst_object_unref(appsink);
 
     return pipeline;
 }
@@ -145,7 +146,12 @@ static void restart_pipeline(StreamData *stream) {
     if (stream->pipeline) {
         gst_element_set_state(stream->pipeline, GST_STATE_NULL);
         gst_object_unref(stream->pipeline);
+        stream->pipeline = NULL;
+    }
+
+    if (stream->appsink) {
         gst_object_unref(stream->appsink);
+        stream->appsink = NULL;
     }
 
     while (true) {
@@ -160,13 +166,23 @@ static void restart_pipeline(StreamData *stream) {
         }
 
         stream->appsink = gst_bin_get_by_name(GST_BIN(stream->pipeline), "sink");
+        if (!stream->appsink) {
+            g_print("Failed to get appsink for channel %d.\n", stream->channel_id);
+            gst_object_unref(stream->pipeline); // 파이프라인 해제
+            stream->pipeline = NULL;
+            continue;
+        }
+
         g_signal_connect(stream->appsink, "new-sample", G_CALLBACK(on_new_sample), stream);
         
         GstStateChangeReturn ret = gst_element_set_state(stream->pipeline, GST_STATE_PLAYING);
 
-        // 파이프라인을 실행 상태로 전환
         if (ret == GST_STATE_CHANGE_FAILURE) {
             g_print("Failed to set pipeline to PLAYING for channel %d.\n", stream->channel_id);
+            gst_object_unref(stream->pipeline); // 파이프라인 해제
+            gst_object_unref(stream->appsink);  // appsink 해제
+            stream->pipeline = NULL;
+            stream->appsink = NULL;
             continue;
         } else {
             break;
@@ -191,7 +207,6 @@ static void* stream_thread(void *arg) {
     }
 
     bus = gst_element_get_bus(stream->pipeline);
-
     g_signal_connect(stream->appsink, "new-sample", G_CALLBACK(on_new_sample), stream);
 
     stream->running = TRUE;
@@ -203,8 +218,8 @@ static void* stream_thread(void *arg) {
                                          (GstMessageType)(GST_MESSAGE_ERROR | GST_MESSAGE_EOS));
         
         if (msg != NULL) {
-            GError *err;
-            gchar *debug_info;
+            GError *err = NULL;
+            gchar *debug_info = NULL;
 
             switch (GST_MESSAGE_TYPE(msg)) {
                 case GST_MESSAGE_ERROR:
@@ -215,22 +230,28 @@ static void* stream_thread(void *arg) {
                     g_clear_error(&err);
                     g_free(debug_info);
 
+                    gst_message_unref(msg);
+                    gst_object_unref(bus);
+
                     restart_pipeline(stream);  // 파이프라인 재구성
                     bus = gst_element_get_bus(stream->pipeline);
-             
                     break;
 
                 case GST_MESSAGE_EOS:
                     g_print("End of stream for channel %d. Restarting pipeline.\n", stream->channel_id);
+                    gst_message_unref(msg);
+                    gst_object_unref(bus);
+
                     restart_pipeline(stream);  // 파이프라인 재구성
                     bus = gst_element_get_bus(stream->pipeline);
-                  
                     break;
 
                 default:
+                    gst_message_unref(msg);
+                    gst_object_unref(bus);
                     break;
             }
-            gst_message_unref(msg);
+            // gst_message_unref(msg);
         }
 
         usleep(30000);  // 0.03초 대기
@@ -239,6 +260,7 @@ static void* stream_thread(void *arg) {
     gst_object_unref(bus);
     gst_element_set_state(stream->pipeline, GST_STATE_NULL);
     gst_object_unref(stream->pipeline);
+    gst_object_unref(stream->appsink); 
     return NULL;
 }
 
@@ -293,11 +315,47 @@ static PyObject* get_next_frame(PyObject* self, PyObject* args) {
 
     PyObject* py_array = PyBytes_FromStringAndSize(reinterpret_cast<const char*>(frame_data.image.data), frame_data.image.total() * frame_data.image.elemSize());
     PyObject* py_tuple = PyTuple_Pack(3, py_array, PyLong_FromLong(frame_data.channel_id), PyLong_FromLong(frame_data.timestamp));
+    Py_DECREF(py_array);
     return py_tuple;
+}
+
+static PyObject* stop_stream_processing(PyObject* self, PyObject* args) {
+    if (stream_data == nullptr || threads == nullptr) {
+        Py_RETURN_NONE;
+    }
+
+    for (int i = 0; i < NUM_CHANNELS; i++) {
+        stream_data[i].running = FALSE;
+        pthread_join(threads[i], NULL);
+        gst_object_unref(stream_data[i].appsink);
+        gst_element_set_state(stream_data[i].pipeline, GST_STATE_NULL);
+        gst_object_unref(stream_data[i].pipeline);
+    }
+
+    delete[] stream_data;
+    delete[] threads;
+
+    pthread_mutex_destroy(&queue_mutex);
+    pthread_cond_destroy(&queue_cond);
+
+    // 큐의 남아있는 데이터 정리
+    while (!image_queue.empty()) {
+        FrameData frame = image_queue.front();
+        image_queue.pop();
+        // 이미지 메모리 해제
+        frame.image.release();
+    }
+
+    Py_RETURN_NONE;
 }
 
 static PyObject* start_stream_processing(PyObject* self, PyObject* args) {
     gst_init(NULL, NULL);
+
+    // 기존 리소스 해제
+    if (stream_data != nullptr) {
+        stop_stream_processing(self, args);  // 기존 리소스 해제 호출
+    }
 
     if (NUM_CHANNELS == 0) {
         PyErr_SetString(PyExc_RuntimeError, "No channels configured");
@@ -319,25 +377,6 @@ static PyObject* start_stream_processing(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
-static PyObject* stop_stream_processing(PyObject* self, PyObject* args) {
-    if (stream_data == nullptr || threads == nullptr) {
-        Py_RETURN_NONE;
-    }
-
-    for (int i = 0; i < NUM_CHANNELS; i++) {
-        stream_data[i].running = FALSE;
-        pthread_join(threads[i], NULL);
-        gst_object_unref(stream_data[i].appsink);
-    }
-
-    delete[] stream_data;
-    delete[] threads;
-
-    pthread_mutex_destroy(&queue_mutex);
-    pthread_cond_destroy(&queue_cond);
-
-    Py_RETURN_NONE;
-}
 
 static PyMethodDef StreamProcessorMethods[] = {
     {"set_stream_config",       set_stream_config,       METH_VARARGS, "Set stream configuration."},
